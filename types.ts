@@ -6,6 +6,7 @@ export enum AppState {
 }
 
 export enum RecordingStatus {
+  RECORDING = 'RECORDING', // Active recording session
   PENDING = 'PENDING',     // Recorded, but not sent to API yet (or API failed)
   COMPLETED = 'COMPLETED', // Successfully transcribed
   ERROR = 'ERROR',         // API error / Network down
@@ -46,4 +47,5 @@ export interface AppSettings {
   geminiApiKey: string;
   localBaseUrl: string;
   localModelName: string;
+  streamChunks: boolean; // New toggle for streaming
 }

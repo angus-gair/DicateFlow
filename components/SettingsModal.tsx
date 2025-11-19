@@ -19,7 +19,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, currentSettings, onSa
 
   if (!isOpen) return null;
 
-  const handleChange = (field: keyof AppSettings, value: string) => {
+  const handleChange = (field: keyof AppSettings, value: any) => {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
@@ -70,6 +70,20 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, currentSettings, onSa
                 {formData.provider === TranscriptionProvider.LOCAL && <CheckCircleIcon className="w-4 h-4" />}
               </button>
             </div>
+          </div>
+
+          {/* Streaming Toggle */}
+          <div className="flex items-center justify-between p-3 bg-gray-800 rounded-lg border border-gray-700">
+            <div className="flex flex-col">
+              <span className="text-sm font-medium text-gray-200">Stream in Chunks</span>
+              <span className="text-xs text-gray-500">Transcribe every 5s while recording</span>
+            </div>
+            <button
+              onClick={() => setFormData(prev => ({ ...prev, streamChunks: !prev.streamChunks }))}
+              className={`relative w-10 h-6 rounded-full transition-colors ${formData.streamChunks ? 'bg-brand-500' : 'bg-gray-600'}`}
+            >
+              <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform ${formData.streamChunks ? 'translate-x-4' : ''}`} />
+            </button>
           </div>
 
           {/* Conditional Fields */}

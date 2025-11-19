@@ -8,16 +8,19 @@ import AudioVisualizer from './components/AudioVisualizer';
 import TechRecommendation from './components/TechRecommendation';
 import SettingsModal from './components/SettingsModal';
 import { transcribe } from './services/transcriptionService';
-import { AppState, RecordingSession, RecordingStatus, AppSettings, TranscriptionProvider } from './types';
-import { formatTime } from './utils/audioUtils';
+import { AppState, RecordingSession, RecordingStatus, AppSettings, TranscriptionProvider, TranscriptionSegment } from './types';
+import { formatTime, parseTime } from './utils/audioUtils';
 import { saveRecordingToDB, getRecordingsFromDB, updateRecordingInDB, deleteOldRecordings, clearAllRecordings } from './utils/db';
 
 const DEFAULT_SETTINGS: AppSettings = {
   provider: TranscriptionProvider.GEMINI,
-  geminiApiKey: '', // Not used in UI, handled by env var currently
+  geminiApiKey: '', 
   localBaseUrl: 'http://localhost:1234/v1',
-  localModelName: 'whisper-1'
+  localModelName: 'whisper-1',
+  streamChunks: false
 };
+
+const CHUNK_INTERVAL_MS = 5000;
 
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
@@ -39,9 +42,15 @@ const App: React.FC = () => {
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const chunkBufferRef = useRef<Blob[]>([]); // For streaming
   const timerRef = useRef<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Streaming Refs
+  const currentSessionIdRef = useRef<string | null>(null);
+  const lastChunkTimeRef = useRef<number>(0);
+  const chunkOffsetRef = useRef<number>(0);
 
   // Load history and settings
   useEffect(() => {
@@ -82,31 +91,111 @@ const App: React.FC = () => {
       setStream(mediaStream);
       
       const options = { mimeType: 'audio/webm' };
+      // Using 1000ms timeslice to get data every second for potential processing
       const recorder = new MediaRecorder(mediaStream, MediaRecorder.isTypeSupported('audio/webm') ? options : undefined);
       
       mediaRecorderRef.current = recorder;
       audioChunksRef.current = [];
-
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      recorder.onstop = handleStop;
-
-      recorder.start();
-      setAppState(AppState.RECORDING);
+      chunkBufferRef.current = [];
       
+      const sessionId = crypto.randomUUID();
+      currentSessionIdRef.current = sessionId;
+      
+      // Initialize State for UI
+      setAppState(AppState.RECORDING);
       setRecordingTime(0);
       timerRef.current = window.setInterval(() => {
         setRecordingTime(prev => prev + 1);
       }, 1000);
 
+      // If streaming, create session immediately
+      if (settings.streamChunks) {
+        const initialSession: RecordingSession = {
+          id: sessionId,
+          createdAt: Date.now(),
+          blob: new Blob([], { type: 'audio/webm' }), // Empty initially
+          status: RecordingStatus.RECORDING,
+          segments: []
+        };
+        setRecordings(prev => [...prev, initialSession]);
+        lastChunkTimeRef.current = Date.now();
+        chunkOffsetRef.current = 0;
+      }
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+          
+          if (settings.streamChunks) {
+            chunkBufferRef.current.push(event.data);
+            const now = Date.now();
+            if (now - lastChunkTimeRef.current >= CHUNK_INTERVAL_MS) {
+              processCurrentChunk();
+              lastChunkTimeRef.current = now;
+            }
+          }
+        }
+      };
+
+      recorder.onstop = () => handleStop(sessionId); // Pass ID to ensure we reference correct session
+
+      recorder.start(1000); // Trigger dataavailable every 1s
+
     } catch (err) {
       console.error("Error accessing microphone:", err);
       setGlobalError("Microphone access denied.");
       setAppState(AppState.ERROR);
+    }
+  };
+
+  const processCurrentChunk = async () => {
+    if (chunkBufferRef.current.length === 0 || !currentSessionIdRef.current) return;
+
+    const chunkBlob = new Blob(chunkBufferRef.current, { type: 'audio/webm' });
+    chunkBufferRef.current = []; // Clear buffer
+    
+    // Calculate offset before async op
+    const timeOffset = chunkOffsetRef.current; 
+    // Estimate chunk duration roughly by interval, or better, just use accumulating offset
+    // We will update offset based on what we process? No, we update offset based on recording time.
+    // Let's use the current recordingTime state as the end point approx.
+    // Actually simpler: just use the timeOffset for this chunk.
+    
+    // Update offset for NEXT chunk. This is naive but works for 5s chunks.
+    chunkOffsetRef.current += (CHUNK_INTERVAL_MS / 1000); 
+
+    try {
+      const segments = await transcribe(chunkBlob, settings);
+      
+      // Adjust timestamps
+      const adjustedSegments = segments.map(seg => {
+        const seconds = parseTime(seg.timestamp);
+        const totalSeconds = seconds + timeOffset;
+        return {
+          ...seg,
+          timestamp: formatTime(totalSeconds)
+        };
+      });
+
+      if (adjustedSegments.length > 0) {
+        setRecordings(prev => prev.map(rec => {
+          if (rec.id === currentSessionIdRef.current) {
+            return {
+              ...rec,
+              segments: [...rec.segments, ...adjustedSegments]
+            };
+          }
+          return rec;
+        }));
+        
+        // Auto-scroll
+        setTimeout(() => {
+           messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 100);
+      }
+    } catch (e) {
+      console.warn("Chunk transcription failed (ignoring for stream):", e);
+      // We don't fail the session in streaming mode, just skip the chunk output
     }
   };
 
@@ -124,30 +213,68 @@ const App: React.FC = () => {
     }
   };
 
-  const handleStop = async () => {
-    const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+  const handleStop = async (sessionId: string) => {
+    const fullAudioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
     
-    const newSession: RecordingSession = {
-      id: crypto.randomUUID(),
-      createdAt: Date.now(),
-      blob: audioBlob,
-      status: RecordingStatus.PENDING,
-      segments: []
-    };
+    if (settings.streamChunks) {
+      // Process any remaining data
+      await processCurrentChunk();
+      
+      // Finalize the streaming session
+      const completedSession: RecordingSession = {
+        id: sessionId,
+        createdAt: Date.now(), // Keep original or update? Keep logic simple
+        blob: fullAudioBlob, // Save full blob
+        status: RecordingStatus.COMPLETED,
+        // Segments are already in state from streaming
+        segments: recordings.find(r => r.id === sessionId)?.segments || []
+      };
+      
+      // Ensure we have the latest segments from state before saving
+      // React state might be slightly behind inside this callback closure if not careful.
+      // However, setRecordings functional update handles UI.
+      // To get accurate segments for DB, we should grab from state or wait.
+      // A clean way is to use the functional update to get the segments.
+      
+      setRecordings(prev => {
+        const session = prev.find(r => r.id === sessionId);
+        const finalSegments = session ? session.segments : [];
+        
+        const finalSession = { ...completedSession, segments: finalSegments };
+        saveRecordingToDB(finalSession); // Fire and forget DB save
+        updateRecordingInDB(finalSession);
+        
+        return prev.map(r => r.id === sessionId ? finalSession : r);
+      });
 
-    await saveRecordingToDB(newSession);
-    await deleteOldRecordings();
-    setLastSaved(new Date());
+      setAppState(AppState.IDLE);
+      setLastSaved(new Date());
 
-    setRecordings(prev => [...prev, newSession]);
-    setAppState(AppState.PROCESSING);
+    } else {
+      // STANDARD MODE (Process at end)
+      const newSession: RecordingSession = {
+        id: sessionId,
+        createdAt: Date.now(),
+        blob: fullAudioBlob,
+        status: RecordingStatus.PENDING,
+        segments: []
+      };
 
-    await processSession(newSession);
+      await saveRecordingToDB(newSession);
+      await deleteOldRecordings();
+      setLastSaved(new Date());
+
+      setRecordings(prev => [...prev, newSession]);
+      setAppState(AppState.PROCESSING);
+
+      await processSession(newSession);
+    }
+    
+    currentSessionIdRef.current = null;
   };
 
   const processSession = async (session: RecordingSession) => {
     try {
-      // Use the generic transcribe function that routes based on settings
       const newSegments = await transcribe(session.blob, settings);
       
       const updatedSession: RecordingSession = {
@@ -172,7 +299,6 @@ const App: React.FC = () => {
       let msg = "Failed to transcribe.";
       if (error instanceof Error) msg = error.message;
       
-      // Better error msg for local connection
       if (settings.provider === TranscriptionProvider.LOCAL && msg.includes('Failed to fetch')) {
         msg = "Could not connect to Local Server. Ensure it is running.";
       }
@@ -313,7 +439,7 @@ const App: React.FC = () => {
                          
                          {rec.status === RecordingStatus.COMPLETED ? (
                            <CheckCircleIcon className="w-4 h-4 text-green-500" />
-                         ) : rec.status === RecordingStatus.PENDING ? (
+                         ) : rec.status === RecordingStatus.PENDING || rec.status === RecordingStatus.RECORDING ? (
                            <LoaderIcon className="w-4 h-4 text-yellow-500 animate-spin" />
                          ) : (
                            <div className="flex items-center gap-1">
@@ -331,6 +457,13 @@ const App: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
+          {settings.streamChunks && appState === AppState.RECORDING && (
+            <div className="flex items-center gap-1.5 px-2 py-1 bg-red-500/10 border border-red-500/30 rounded text-red-400 text-[10px] font-bold animate-pulse">
+              <div className="w-1.5 h-1.5 rounded-full bg-red-500" />
+              LIVE
+            </div>
+          )}
+
           <button 
             onClick={() => setShowSettingsModal(true)}
             className="flex items-center gap-1.5 text-xs font-medium text-gray-400 hover:text-white transition px-2 py-1 rounded hover:bg-gray-900"
@@ -357,7 +490,7 @@ const App: React.FC = () => {
             <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-widest">Signal Input</h2>
             <div className="flex items-center gap-3">
                <span className="text-[10px] font-mono uppercase text-gray-600 px-2 py-0.5 bg-gray-900 rounded border border-gray-800">
-                 VIA: {settings.provider}
+                 VIA: {settings.provider} {settings.streamChunks ? '(STREAM)' : ''}
                </span>
                <div className="font-mono text-brand-500 text-sm">
                  {formatTime(recordingTime)}
@@ -460,14 +593,22 @@ const App: React.FC = () => {
                     <span className="text-[10px] font-mono bg-gray-800 px-1.5 rounded text-gray-400">
                       {new Date(session.createdAt).toLocaleTimeString()}
                     </span>
+                    {session.status === RecordingStatus.RECORDING && (
+                      <span className="text-[10px] font-mono bg-red-900/40 border border-red-500/30 px-1.5 rounded text-red-400 animate-pulse">
+                        REC
+                      </span>
+                    )}
                     <div className="h-px bg-gray-800 flex-1" />
                   </div>
 
                   {/* Session Content based on Status */}
-                  {session.status === RecordingStatus.COMPLETED ? (
+                  {(session.status === RecordingStatus.COMPLETED || session.status === RecordingStatus.RECORDING) ? (
                     <div className="space-y-4">
+                       {session.segments.length === 0 && session.status === RecordingStatus.RECORDING && (
+                         <div className="text-xs text-gray-600 italic pl-1">Listening...</div>
+                       )}
                       {session.segments.map((segment, idx) => (
-                        <div key={idx} className="group flex gap-4 items-start">
+                        <div key={idx} className="group flex gap-4 items-start animate-in fade-in slide-in-from-bottom-1">
                            <div className="flex-shrink-0 w-16 pt-1">
                             <span className="text-xs font-mono text-brand-500 bg-brand-500/10 px-1.5 py-0.5 rounded border border-brand-500/20">
                               {segment.timestamp}

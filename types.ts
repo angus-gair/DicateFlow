@@ -35,3 +35,15 @@ export interface RecordingSession {
   segments: TranscriptionSegment[];
   errorMessage?: string;
 }
+
+export enum TranscriptionProvider {
+  GEMINI = 'GEMINI',
+  LOCAL = 'LOCAL',
+}
+
+export interface AppSettings {
+  provider: TranscriptionProvider;
+  geminiApiKey: string;
+  localBaseUrl: string;
+  localModelName: string;
+}

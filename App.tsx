@@ -2,27 +2,39 @@ import React, { useState, useRef, useEffect } from 'react';
 import { 
   MicIcon, SquareIcon, CopyIcon, InfoIcon, LoaderIcon, 
   RefreshIcon, TrashIcon, ChevronDownIcon, CheckCircleIcon, 
-  AlertCircleIcon, WifiOffIcon 
+  AlertCircleIcon, WifiOffIcon, SearchIcon, SettingsIcon 
 } from './components/Icons';
 import AudioVisualizer from './components/AudioVisualizer';
 import TechRecommendation from './components/TechRecommendation';
-import { transcribeAudio } from './services/geminiService';
-import { AppState, RecordingSession, RecordingStatus, TranscriptionSegment } from './types';
+import SettingsModal from './components/SettingsModal';
+import { transcribe } from './services/transcriptionService';
+import { AppState, RecordingSession, RecordingStatus, AppSettings, TranscriptionProvider } from './types';
 import { formatTime } from './utils/audioUtils';
 import { saveRecordingToDB, getRecordingsFromDB, updateRecordingInDB, deleteOldRecordings, clearAllRecordings } from './utils/db';
 
+const DEFAULT_SETTINGS: AppSettings = {
+  provider: TranscriptionProvider.GEMINI,
+  geminiApiKey: '', // Not used in UI, handled by env var currently
+  localBaseUrl: 'http://localhost:1234/v1',
+  localModelName: 'whisper-1'
+};
+
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
-  // We now store sessions instead of just segments
   const [recordings, setRecordings] = useState<RecordingSession[]>([]);
   
   const [recordingTime, setRecordingTime] = useState<number>(0);
   const [stream, setStream] = useState<MediaStream | null>(null);
+  
+  // Modals
   const [showTechModal, setShowTechModal] = useState<boolean>(false);
+  const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
   const [showHistoryDropdown, setShowHistoryDropdown] = useState<boolean>(false);
+  
   const [lastSaved, setLastSaved] = useState<Date | null>(null);
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
 
-  // Helper to see global error state if the LAST attempt failed
   const [globalError, setGlobalError] = useState<string | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -31,25 +43,24 @@ const App: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Load recordings from IndexedDB on mount
+  // Load history and settings
   useEffect(() => {
-    const loadHistory = async () => {
+    const loadData = async () => {
       try {
         const savedRecordings = await getRecordingsFromDB();
-        // IndexedDB returns sorted by createdAt desc, but for the view we might want asc or we just render properly
-        // For the transcript view, we usually want chronological order (Oldest -> Newest).
-        // For the dropdown history, we want Newest -> Oldest.
-        
-        // Let's sort recordings chronologically (Oldest first) for the main view
         const chronological = [...savedRecordings].sort((a, b) => a.createdAt - b.createdAt);
         setRecordings(chronological);
+
+        const savedSettings = localStorage.getItem('dictateflow_settings');
+        if (savedSettings) {
+          setSettings(JSON.parse(savedSettings));
+        }
       } catch (e) {
-        console.error("Failed to load history", e);
+        console.error("Failed to load data", e);
       }
     };
-    loadHistory();
+    loadData();
     
-    // Click outside listener for dropdown
     const handleClickOutside = (event: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setShowHistoryDropdown(false);
@@ -58,6 +69,11 @@ const App: React.FC = () => {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  const handleSaveSettings = (newSettings: AppSettings) => {
+    setSettings(newSettings);
+    localStorage.setItem('dictateflow_settings', JSON.stringify(newSettings));
+  };
 
   const startRecording = async () => {
     try {
@@ -111,7 +127,6 @@ const App: React.FC = () => {
   const handleStop = async () => {
     const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
     
-    // 1. Create a new Session Object
     const newSession: RecordingSession = {
       id: crypto.randomUUID(),
       createdAt: Date.now(),
@@ -120,41 +135,34 @@ const App: React.FC = () => {
       segments: []
     };
 
-    // 2. Save to DB immediately (Safety first!)
     await saveRecordingToDB(newSession);
-    await deleteOldRecordings(); // Maintain max 20 limit
+    await deleteOldRecordings();
     setLastSaved(new Date());
 
-    // 3. Update State to show the pending block
     setRecordings(prev => [...prev, newSession]);
     setAppState(AppState.PROCESSING);
 
-    // 4. Attempt Transcription
     await processSession(newSession);
   };
 
   const processSession = async (session: RecordingSession) => {
     try {
-      // Update UI to show processing for this specific session (if needed, or just global app state)
-      // Note: appState is global, but the UI renders based on session.status too.
-      
-      const newSegments = await transcribeAudio(session.blob);
+      // Use the generic transcribe function that routes based on settings
+      const newSegments = await transcribe(session.blob, settings);
       
       const updatedSession: RecordingSession = {
         ...session,
         status: RecordingStatus.COMPLETED,
-        segments: newSegments
+        segments: newSegments,
+        errorMessage: undefined
       };
 
-      // Update DB
       await updateRecordingInDB(updatedSession);
       setLastSaved(new Date());
 
-      // Update State
       setRecordings(prev => prev.map(r => r.id === session.id ? updatedSession : r));
       setAppState(AppState.IDLE);
       
-      // Scroll to bottom
       setTimeout(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
       }, 100);
@@ -164,6 +172,11 @@ const App: React.FC = () => {
       let msg = "Failed to transcribe.";
       if (error instanceof Error) msg = error.message;
       
+      // Better error msg for local connection
+      if (settings.provider === TranscriptionProvider.LOCAL && msg.includes('Failed to fetch')) {
+        msg = "Could not connect to Local Server. Ensure it is running.";
+      }
+
       const failedSession: RecordingSession = {
         ...session,
         status: RecordingStatus.ERROR,
@@ -174,14 +187,24 @@ const App: React.FC = () => {
       setRecordings(prev => prev.map(r => r.id === session.id ? failedSession : r));
       
       setGlobalError(msg);
-      setAppState(AppState.IDLE); // Go back to IDLE so user can record again, even if last one failed
+      setAppState(AppState.IDLE);
     }
   };
 
   const handleRetry = async (session: RecordingSession) => {
      setAppState(AppState.PROCESSING);
      setGlobalError(null);
-     await processSession(session);
+     
+     const pendingSession: RecordingSession = {
+       ...session,
+       status: RecordingStatus.PENDING,
+       errorMessage: undefined
+     };
+     
+     setRecordings(prev => prev.map(r => r.id === session.id ? pendingSession : r));
+     await updateRecordingInDB(pendingSession);
+
+     await processSession(pendingSession);
   };
 
   const handleSegmentChange = (sessionId: string, segmentIndex: number, newText: string) => {
@@ -193,7 +216,7 @@ const App: React.FC = () => {
         updatedSegments[segmentIndex] = { ...updatedSegments[segmentIndex], text: newText };
         
         const updatedRec = { ...rec, segments: updatedSegments };
-        updateRecordingInDB(updatedRec); // Auto-save edit to DB
+        updateRecordingInDB(updatedRec);
         return updatedRec;
       });
       return updatedRecordings;
@@ -210,7 +233,6 @@ const App: React.FC = () => {
   };
 
   const copyAllText = () => {
-    // Aggregate text from all COMPLETED sessions
     const fullText = recordings
       .filter(r => r.status === RecordingStatus.COMPLETED)
       .flatMap(r => r.segments.map(s => s.text))
@@ -218,12 +240,23 @@ const App: React.FC = () => {
     navigator.clipboard.writeText(fullText);
   };
 
-  // Derive the history list for the dropdown (Newest First)
   const historyList = [...recordings].sort((a, b) => b.createdAt - a.createdAt);
+
+  const filteredRecordings = recordings.filter(session => {
+    if (!searchQuery) return true;
+    const query = searchQuery.toLowerCase();
+    return session.segments.some(segment => segment.text.toLowerCase().includes(query));
+  });
 
   return (
     <div className="min-h-screen flex flex-col bg-gray-950 text-gray-100 selection:bg-brand-500/30">
       <TechRecommendation isOpen={showTechModal} onClose={() => setShowTechModal(false)} />
+      <SettingsModal 
+        isOpen={showSettingsModal} 
+        onClose={() => setShowSettingsModal(false)} 
+        currentSettings={settings}
+        onSave={handleSaveSettings}
+      />
       
       {/* Header */}
       <header className="h-12 border-b border-gray-850 flex items-center justify-between px-4 select-none relative z-20">
@@ -261,11 +294,8 @@ const App: React.FC = () => {
                        <button
                          key={rec.id}
                          onClick={() => {
-                           // Find the element in the main view and scroll to it
                            document.getElementById(`session-${rec.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
                            setShowHistoryDropdown(false);
-                           // If it's an error state, trigger retry automatically per user request implication?
-                           // User said: "when the user clicks on a recording it then transcribes it"
                            if (rec.status === RecordingStatus.ERROR) {
                              handleRetry(rec);
                            }
@@ -300,13 +330,22 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        <button 
-          onClick={() => setShowTechModal(true)}
-          className="flex items-center gap-1.5 text-xs font-medium text-gray-400 hover:text-brand-400 transition px-2 py-1 rounded hover:bg-gray-900"
-        >
-          <InfoIcon className="w-3.5 h-3.5" />
-          <span>LINUX ARCHITECTURE</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button 
+            onClick={() => setShowSettingsModal(true)}
+            className="flex items-center gap-1.5 text-xs font-medium text-gray-400 hover:text-white transition px-2 py-1 rounded hover:bg-gray-900"
+            title="Configure Provider"
+          >
+            <SettingsIcon className="w-4 h-4" />
+          </button>
+          
+          <button 
+            onClick={() => setShowTechModal(true)}
+            className="flex items-center gap-1.5 text-xs font-medium text-gray-400 hover:text-brand-400 transition px-2 py-1 rounded hover:bg-gray-900"
+          >
+            <InfoIcon className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </header>
 
       {/* Main Content */}
@@ -316,8 +355,13 @@ const App: React.FC = () => {
         <section className="space-y-4 flex-shrink-0">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-widest">Signal Input</h2>
-            <div className="font-mono text-brand-500 text-sm">
-              {formatTime(recordingTime)}
+            <div className="flex items-center gap-3">
+               <span className="text-[10px] font-mono uppercase text-gray-600 px-2 py-0.5 bg-gray-900 rounded border border-gray-800">
+                 VIA: {settings.provider}
+               </span>
+               <div className="font-mono text-brand-500 text-sm">
+                 {formatTime(recordingTime)}
+               </div>
             </div>
           </div>
           <AudioVisualizer stream={stream} isRecording={appState === AppState.RECORDING} />
@@ -361,24 +405,37 @@ const App: React.FC = () => {
 
         {/* Editor Area */}
         <section className="flex-1 flex flex-col gap-2 min-h-0 bg-gray-850/50 rounded-xl border border-gray-800 overflow-hidden">
-          <div className="flex items-center justify-between p-4 border-b border-gray-800 bg-gray-900/50">
-             <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-widest">Transcript History</h2>
+          <div className="flex items-center justify-between p-4 border-b border-gray-800 bg-gray-900/50 gap-4">
+             <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-widest hidden md:block">Transcript History</h2>
+             
+             {/* Search Bar */}
+             <div className="flex-1 max-w-md relative">
+                <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+                <input 
+                  type="text" 
+                  placeholder="Search transcripts..." 
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full bg-gray-950 border border-gray-800 rounded-full pl-9 pr-4 py-1.5 text-sm text-gray-300 focus:outline-none focus:border-brand-500 transition-colors placeholder-gray-600"
+                />
+             </div>
+
              <div className="flex items-center gap-2">
                <button 
                  onClick={clearAll}
-                 className="text-xs flex items-center gap-1 text-gray-500 hover:text-red-400 transition px-2 py-1 rounded hover:bg-gray-800"
+                 className="text-xs flex items-center gap-1 text-gray-500 hover:text-red-400 transition px-2 py-1 rounded hover:bg-gray-800 whitespace-nowrap"
                  disabled={recordings.length === 0}
                >
                  <TrashIcon className="w-3 h-3" />
-                 CLEAR ALL
+                 <span className="hidden sm:inline">CLEAR ALL</span>
                </button>
                <button 
                  onClick={copyAllText}
-                 className="text-xs flex items-center gap-1 text-gray-500 hover:text-white transition px-2 py-1 rounded hover:bg-gray-800"
+                 className="text-xs flex items-center gap-1 text-gray-500 hover:text-white transition px-2 py-1 rounded hover:bg-gray-800 whitespace-nowrap"
                  disabled={recordings.length === 0}
                >
                  <CopyIcon className="w-3 h-3" />
-                 COPY ALL
+                 <span className="hidden sm:inline">COPY ALL</span>
                </button>
              </div>
           </div>
@@ -389,8 +446,13 @@ const App: React.FC = () => {
                 <MicIcon className="w-8 h-8" />
                 <span className="text-sm">Ready to record. History is empty.</span>
               </div>
+            ) : filteredRecordings.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center text-gray-600 gap-2 opacity-50">
+                <SearchIcon className="w-8 h-8" />
+                <span className="text-sm">No matching transcripts found.</span>
+              </div>
             ) : (
-              recordings.map((session) => (
+              filteredRecordings.map((session) => (
                 <div key={session.id} id={`session-${session.id}`} className="border-b border-gray-800/50 pb-6 last:border-0">
                   
                   {/* Session Header */}
@@ -422,7 +484,6 @@ const App: React.FC = () => {
                               target.style.height = 'auto';
                               target.style.height = target.scrollHeight + 'px';
                             }}
-                            // Initialize height on mount
                             ref={el => {
                               if (el) {
                                 el.style.height = 'auto';
@@ -455,7 +516,7 @@ const App: React.FC = () => {
                   ) : (
                     <div className="flex items-center gap-3 p-4 bg-gray-900/30 rounded-lg border border-gray-800 border-dashed">
                       <LoaderIcon className="w-4 h-4 text-brand-500 animate-spin" />
-                      <span className="text-sm text-gray-500 italic">Processing audio...</span>
+                      <span className="text-sm text-gray-500 italic">Processing audio via {settings.provider}...</span>
                     </div>
                   )}
                 </div>

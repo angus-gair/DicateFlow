@@ -1,3 +1,4 @@
+
 import React, { useEffect, useState } from 'react';
 import { XIcon, SettingsIcon, CheckCircleIcon } from './Icons';
 import { AppSettings, TranscriptionProvider } from '../types';
@@ -11,10 +12,14 @@ interface Props {
 
 const SettingsModal: React.FC<Props> = ({ isOpen, onClose, currentSettings, onSave }) => {
   const [formData, setFormData] = useState<AppSettings>(currentSettings);
+  const [vocabInput, setVocabInput] = useState<string>('');
 
   // Sync when modal opens
   useEffect(() => {
-    if (isOpen) setFormData(currentSettings);
+    if (isOpen) {
+      setFormData(currentSettings);
+      setVocabInput(currentSettings.customVocabulary?.join(', ') || '');
+    }
   }, [isOpen, currentSettings]);
 
   if (!isOpen) return null;
@@ -24,14 +29,23 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, currentSettings, onSa
   };
 
   const handleSave = () => {
-    onSave(formData);
+    // Parse vocabulary string into array
+    const vocabArray = vocabInput
+      .split(',')
+      .map(s => s.trim())
+      .filter(s => s.length > 0);
+
+    onSave({
+      ...formData,
+      customVocabulary: vocabArray
+    });
     onClose();
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in">
-      <div className="bg-gray-850 border border-gray-750 rounded-xl shadow-2xl max-w-md w-full overflow-hidden flex flex-col">
-        <div className="flex items-center justify-between p-4 border-b border-gray-750 bg-gray-900">
+      <div className="bg-gray-850 border border-gray-750 rounded-xl shadow-2xl max-w-md w-full overflow-hidden flex flex-col max-h-[90vh]">
+        <div className="flex items-center justify-between p-4 border-b border-gray-750 bg-gray-900 flex-shrink-0">
           <h2 className="text-lg font-semibold text-white flex items-center gap-2">
             <SettingsIcon className="text-gray-400" />
             Settings
@@ -41,7 +55,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, currentSettings, onSa
           </button>
         </div>
         
-        <div className="p-6 space-y-6">
+        <div className="p-6 space-y-6 overflow-y-auto">
           
           {/* Provider Selection */}
           <div className="space-y-3">
@@ -86,10 +100,27 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, currentSettings, onSa
             </button>
           </div>
 
+          {/* Custom Vocabulary */}
+          <div className="space-y-2">
+             <label className="text-xs font-mono text-gray-500 uppercase tracking-wider">Custom Dictionary</label>
+             <div className="p-3 bg-gray-800 border border-gray-700 rounded-lg">
+                <p className="text-xs text-gray-400 mb-2">
+                  Enter technical terms, packages, or specific spellings separated by commas. 
+                  (e.g., <code>shadcn, tRPC, kubernetes, PyTorch</code>)
+                </p>
+                <textarea
+                  value={vocabInput}
+                  onChange={(e) => setVocabInput(e.target.value)}
+                  className="w-full bg-gray-950 border border-gray-700 rounded p-2 text-sm text-white focus:border-brand-500 focus:outline-none min-h-[80px]"
+                  placeholder="React, Svelte, Docker, ..."
+                />
+             </div>
+          </div>
+
           {/* Conditional Fields */}
           {formData.provider === TranscriptionProvider.GEMINI ? (
             <div className="p-4 bg-brand-900/10 border border-brand-500/20 rounded-lg text-sm text-brand-200">
-              <p className="opacity-80">Using Cloud API (Gemini 2.5 Flash). The API Key is currently managed via environment variables.</p>
+              <p className="opacity-80">Using Cloud API (Gemini 2.5 Flash). The API Key is managed via environment variables.</p>
             </div>
           ) : (
             <div className="space-y-4 animate-in slide-in-from-top-2">
@@ -122,7 +153,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, currentSettings, onSa
           )}
         </div>
 
-        <div className="p-4 border-t border-gray-750 bg-gray-900 flex justify-end gap-3">
+        <div className="p-4 border-t border-gray-750 bg-gray-900 flex justify-end gap-3 flex-shrink-0">
           <button 
             onClick={onClose}
             className="px-4 py-2 hover:bg-gray-800 text-gray-400 rounded text-sm font-medium transition"

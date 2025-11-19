@@ -1,3 +1,4 @@
+
 export enum AppState {
   IDLE = 'IDLE',
   RECORDING = 'RECORDING',
@@ -47,5 +48,6 @@ export interface AppSettings {
   geminiApiKey: string;
   localBaseUrl: string;
   localModelName: string;
-  streamChunks: boolean; // New toggle for streaming
+  streamChunks: boolean;
+  customVocabulary: string[]; // New: List of custom words/phrases
 }

@@ -1,3 +1,4 @@
+
 import React, { useState, useRef, useEffect } from 'react';
 import { 
   MicIcon, SquareIcon, CopyIcon, InfoIcon, LoaderIcon, 
@@ -17,7 +18,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   geminiApiKey: '', 
   localBaseUrl: 'http://localhost:1234/v1',
   localModelName: 'whisper-1',
-  streamChunks: false
+  streamChunks: false,
+  customVocabulary: []
 };
 
 const CHUNK_INTERVAL_MS = 5000;
@@ -62,7 +64,7 @@ const App: React.FC = () => {
 
         const savedSettings = localStorage.getItem('dictateflow_settings');
         if (savedSettings) {
-          setSettings(JSON.parse(savedSettings));
+          setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(savedSettings) });
         }
       } catch (e) {
         console.error("Failed to load data", e);
@@ -156,10 +158,6 @@ const App: React.FC = () => {
     
     // Calculate offset before async op
     const timeOffset = chunkOffsetRef.current; 
-    // Estimate chunk duration roughly by interval, or better, just use accumulating offset
-    // We will update offset based on what we process? No, we update offset based on recording time.
-    // Let's use the current recordingTime state as the end point approx.
-    // Actually simpler: just use the timeOffset for this chunk.
     
     // Update offset for NEXT chunk. This is naive but works for 5s chunks.
     chunkOffsetRef.current += (CHUNK_INTERVAL_MS / 1000); 
@@ -180,9 +178,14 @@ const App: React.FC = () => {
       if (adjustedSegments.length > 0) {
         setRecordings(prev => prev.map(rec => {
           if (rec.id === currentSessionIdRef.current) {
+            // Combine with existing segments
+            const allSegments = [...rec.segments, ...adjustedSegments];
+            // SORT by timestamp to fix out-of-order async responses
+            allSegments.sort((a, b) => parseTime(a.timestamp) - parseTime(b.timestamp));
+
             return {
               ...rec,
-              segments: [...rec.segments, ...adjustedSegments]
+              segments: allSegments
             };
           }
           return rec;
@@ -231,11 +234,6 @@ const App: React.FC = () => {
       };
       
       // Ensure we have the latest segments from state before saving
-      // React state might be slightly behind inside this callback closure if not careful.
-      // However, setRecordings functional update handles UI.
-      // To get accurate segments for DB, we should grab from state or wait.
-      // A clean way is to use the functional update to get the segments.
-      
       setRecordings(prev => {
         const session = prev.find(r => r.id === sessionId);
         const finalSegments = session ? session.segments : [];

@@ -1,3 +1,4 @@
+
 import { AppSettings, TranscriptionSegment } from "../types";
 import { formatTime } from "../utils/audioUtils";
 
@@ -22,6 +23,14 @@ export const transcribeWithLocal = async (
   
   // Request verbose JSON to hopefully get segments
   formData.append('response_format', 'verbose_json');
+
+  // Pass Custom Vocabulary as the 'prompt' to guide Whisper
+  if (settings.customVocabulary && settings.customVocabulary.length > 0) {
+    // Whisper prompt has a limit (often 244 tokens), so we just join them.
+    // It biases the model to these words.
+    const promptText = `The transcript contains the following technical terms: ${settings.customVocabulary.join(', ')}.`;
+    formData.append('prompt', promptText);
+  }
 
   try {
     const response = await fetch(endpoint, {

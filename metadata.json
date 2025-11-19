@@ -1,0 +1,7 @@
+{
+  "name": "DictateFlow",
+  "description": "A high-performance dictation and transcription application powered by Gemini 2.5 Flash. Optimized for Linux environments.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
